@@ -401,6 +401,17 @@
             }
         }
 
+        #if DEBUG
+            func captureSettledSnapshotForTesting(in window: UIWindow) {
+                guard let postHog, tryStartScreenshotRender() else { return }
+                scheduleSettledCapture(window: window, screenName: nil, postHog: postHog)
+            }
+
+            var hasScreenshotRenderInFlightForTesting: Bool {
+                screenshotRenderLock.withLock { isScreenshotRenderInFlight }
+            }
+        #endif
+
         /// Determines whether the given session should be recorded based on sample rate configuration.
         /// Local config sample rate takes precedence over remote config.
         /// Returns `true` if no sample rate is configured (record everything).
@@ -1619,13 +1630,14 @@
         /// Settle-then-shoot: after one display-pipeline depth, unchanged mask geometry proves the
         /// displayed frame identical to the current tree, so full-fidelity drawHierarchy is safe
         /// (blur/video/Metal intact); drift within budget keeps drawHierarchy with masks swept to
-        /// cover it. Motion or an unpairable sample drops the frame instead of synchronously
-        /// rendering the whole presentation-layer tree. The next capture retries normally.
+        /// cover it. Motion or an unpairable sample is retried at a limited rate instead of
+        /// synchronously rendering the whole presentation-layer tree. Keep one in-flight
+        /// capture until it settles or recording stops: the dropped layout may be the last one.
         private func scheduleSettledCapture(window: UIWindow, screenName: String?, postHog: PostHogSDK) {
             // Same bails prepareScreenshotWireframe applies, hoisted ahead of the two sampling
             // walks: without this a view controller transition pays for both traversals and then
             // discards them, where before it walked the hierarchy zero times.
-            guard window.isVisible(), !isAnimatingTransition(window) else {
+            guard postHog.isSessionReplayActive(), window.isVisible(), !isAnimatingTransition(window) else {
                 finishScreenshotRender()
                 return
             }
@@ -1638,7 +1650,16 @@
                 // bursts, so a count false-positives on the very burst that triggered the capture.
                 let verdict = Self.settleVerdict(before: sentinelRegions, after: regionsNow)
                 guard verdict.band.usesFidelity else {
-                    self.finishScreenshotRender()
+                    // Layout delivery has already consumed its pending value. There may be no
+                    // later notification, so retry with fresh geometry rather than freezing the
+                    // replay on its previous frame. Retain the slot to prevent queued duplicates.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+                        guard let self else { return }
+                        self.finishScreenshotRender()
+                        // Re-enter the normal gate to recheck recording and select the
+                        // current window; navigation may have changed it while waiting.
+                        self.snapshot()
+                    }
                     return
                 }
                 self.performScreenshotCapture(
@@ -1652,7 +1673,7 @@
         }
 
         @objc private func snapshot() {
-            guard let postHog, postHog.isSessionReplayActive() else {
+            guard let postHog, postHog.isSessionReplayActive(), UIApplication.shared.applicationState != .background else {
                 return
             }
 

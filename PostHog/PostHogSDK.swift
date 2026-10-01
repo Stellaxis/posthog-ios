@@ -3497,6 +3497,14 @@ let maxRetryDelay = 30.0
     #endif
 }
 
+#if DEBUG && os(iOS)
+    extension PostHogSDK {
+        func settledReplayIntegrationForTesting() -> PostHogReplayIntegration? {
+            replayIntegration
+        }
+    }
+#endif
+
 #if TESTING
     extension PostHogSDK {
         #if os(iOS) || targetEnvironment(macCatalyst)
