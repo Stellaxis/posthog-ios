@@ -32,7 +32,7 @@
         // Tuning surface for the settle check. Defaults are deliberately conservative: measured on
         // device, a 25ms window sees ~1.5pt of slow drift, ~4pt of CA animation and 185pt+ of a
         // scroll fling, so everything except a fling keeps the same renderer session replay has
-        // always used, and only a fling trades fidelity for exactly-aligned masks.
+        // always used. A fling drops the frame until mask geometry settles.
 
         /// Gap between the two geometry samples. Raising it delays each capture by that much and
         /// holds the render-in-flight slot longer; lowering it makes the velocity estimate noisier.
@@ -46,10 +46,9 @@
         /// against coverage.
         static let settleTolerancePoints = 80 * CGFloat(settleWindowSeconds)
 
-        /// Above 2000pt/s, drop to the presentation-tree renderer, whose masks cannot disagree with
-        /// its pixels but which flattens blur, video and Metal. Raise to keep more motion at full
-        /// fidelity, paying for it in larger inflated masks; lower for tighter masks and more flat
-        /// frames. Sits between animation and fling so ordinary movement never flattens.
+        /// Above 2000pt/s, skip the screenshot until geometry settles. Raise to keep more motion at
+        /// full fidelity, paying for it in larger inflated masks; lower to drop more moving frames.
+        /// Sits between animation and fling so ordinary movement keeps full fidelity.
         static let driftBudgetPoints = 2000 * CGFloat(settleWindowSeconds)
 
         /// Lead added past the newer sample, as a fraction of the measured displacement — the union
@@ -63,7 +62,7 @@
         enum SettleBand {
             case still, drift, motion
 
-            /// Only motion needs the presentation-tree renderer, which is aligned by construction.
+            /// Motion is omitted; the other bands retain the hierarchy renderer.
             var usesFidelity: Bool { self != .motion }
         }
 

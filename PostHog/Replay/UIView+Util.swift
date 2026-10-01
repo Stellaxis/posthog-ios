@@ -111,6 +111,12 @@
         }
 
         func toImage(afterScreenUpdates: Bool = false, preferFidelityRenderer: Bool = true) -> UIImage? {
+            // Unsettled mask geometry cannot safely use drawHierarchy. Rendering the
+            // presentation layer tree instead can spend seconds rasterizing effects
+            // on the main thread. Drop this frame and retry on the next settled tick.
+            guard afterScreenUpdates || preferFidelityRenderer else {
+                return nil
+            }
             let bounds = self.bounds
             let size = bounds.size
 
@@ -128,18 +134,11 @@
                     if afterScreenUpdates {
                         /// The bridge capture passes `true`: a freshly-presented native VC renders black otherwise.
                         drawHierarchy(in: bounds, afterScreenUpdates: true)
-                    } else if preferFidelityRenderer {
+                    } else {
                         // Chosen when the settle check measured little enough movement that the
                         // displayed frame still matches the current tree, so drawHierarchy's
                         // full fidelity (blur, video, Metal) is worth lagging the render server.
                         drawHierarchy(in: bounds, afterScreenUpdates: false)
-                    } else {
-                        // drawHierarchy lags the render server, so mask rects could sit ahead of
-                        // the pixels during scroll or animation; the presentation tree is the same
-                        // source toPresentationRect measures, at the same instant, so the two agree.
-                        // Trade-off: blur, video and Metal render flat, and render(in:) also skips
-                        // filters and layer.mask — content that must stay hidden needs postHogMask().
-                        (layer.presentation() ?? layer).render(in: context)
                     }
                 }
             }

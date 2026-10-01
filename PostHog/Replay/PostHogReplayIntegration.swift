@@ -1274,6 +1274,12 @@
                 return false
             }
 
+            // A failed measuring-tick render is a dropped frame, not permission to
+            // render again with a different mode and potentially stale mask geometry.
+            guard !rendersInMeasuringTick || screenshotCapture.image != nil else {
+                return false
+            }
+
             return renderAndEnqueueScreenshot(
                 screenshotCapture.wireframe,
                 window: window,
@@ -1613,7 +1619,8 @@
         /// Settle-then-shoot: after one display-pipeline depth, unchanged mask geometry proves the
         /// displayed frame identical to the current tree, so full-fidelity drawHierarchy is safe
         /// (blur/video/Metal intact); drift within budget keeps drawHierarchy with masks swept to
-        /// cover it, only motion or an unpairable sample drops to render(in:) for alignment.
+        /// cover it. Motion or an unpairable sample drops the frame instead of synchronously
+        /// rendering the whole presentation-layer tree. The next capture retries normally.
         private func scheduleSettledCapture(window: UIWindow, screenName: String?, postHog: PostHogSDK) {
             // Same bails prepareScreenshotWireframe applies, hoisted ahead of the two sampling
             // walks: without this a view controller transition pays for both traversals and then
@@ -1630,11 +1637,15 @@
                 // Banded on mask geometry alone, not on layout-event counts: layout events arrive in
                 // bursts, so a count false-positives on the very burst that triggered the capture.
                 let verdict = Self.settleVerdict(before: sentinelRegions, after: regionsNow)
+                guard verdict.band.usesFidelity else {
+                    self.finishScreenshotRender()
+                    return
+                }
                 self.performScreenshotCapture(
                     window: window,
                     screenName: screenName,
                     postHog: postHog,
-                    preferFidelityRenderer: verdict.band.usesFidelity,
+                    preferFidelityRenderer: true,
                     overrideMaskRects: verdict.inflatedRects ?? regionsNow?.map(\.rect)
                 )
             }

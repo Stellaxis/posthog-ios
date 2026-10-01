@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A01D1010A01D1010A01D1002 /* PostHogScreenshotSafetyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A01D1010A01D1010A01D1001 /* PostHogScreenshotSafetyTests.swift */; };
 		EFAA01000000000000000001 /* SurveyProgressStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = EFAA01000000000000000002 /* SurveyProgressStore.swift */; };
 		B74800000000000000000001 /* PostHogPushNotificationSwizzlingTest.swift in Sources */ = {isa = PBXBuildFile; fileRef = B74800000000000000000003 /* PostHogPushNotificationSwizzlingTest.swift */; };
 		B74800000000000000000002 /* PHNotificationDelegateTestFixture.m in Sources */ = {isa = PBXBuildFile; fileRef = B74800000000000000000006 /* PHNotificationDelegateTestFixture.m */; };
@@ -820,6 +821,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		A01D1010A01D1010A01D1001 /* PostHogScreenshotSafetyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PostHogScreenshotSafetyTests.swift; sourceTree = "<group>"; };
 		EFAA01000000000000000002 /* SurveyProgressStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurveyProgressStore.swift; sourceTree = "<group>"; };
 		B74800000000000000000003 /* PostHogPushNotificationSwizzlingTest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PostHogPushNotificationSwizzlingTest.swift; sourceTree = "<group>"; };
 		B74800000000000000000004 /* PostHogTests-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "PostHogTests-Bridging-Header.h"; sourceTree = "<group>"; };
@@ -1797,6 +1799,7 @@
 				C0FFEE002F8000010000C005 /* PostHogMaskPresentationPrivacyTest.swift */,
 				B2B2B2B2B2B2B2B2B2B20001 /* PostHogReactNativeMaskingTest.swift */,
 				B2B2B2B2B2B2B2B2B2B20003 /* PostHogMaskFailClosedTest.swift */,
+				A01D1010A01D1010A01D1001 /* PostHogScreenshotSafetyTests.swift */,
 				A1A1A1A1A1A1A1A1A1A10003 /* PostHogMaskSnapshotTest.swift */,
 				DA4FFBB42DAD5AF9006BAEEA /* PostHogIdentityTests.swift */,
 				DA0F98A12D940E7D009AB6F5 /* ApplicationViewLayoutPublisherTest.swift */,
@@ -3706,6 +3709,7 @@
 				C0FFEE002F8000010000C006 /* PostHogMaskPresentationPrivacyTest.swift in Sources */,
 				B2B2B2B2B2B2B2B2B2B20002 /* PostHogReactNativeMaskingTest.swift in Sources */,
 				B2B2B2B2B2B2B2B2B2B20004 /* PostHogMaskFailClosedTest.swift in Sources */,
+				A01D1010A01D1010A01D1002 /* PostHogScreenshotSafetyTests.swift in Sources */,
 				A1A1A1A1A1A1A1A1A1A10004 /* PostHogMaskSnapshotTest.swift in Sources */,
 				DA4FFB152DA93C78006BAEEA /* PostHogSessionReplayTest.swift in Sources */,
 				DA4FFB192DA93C78006BAEEA /* PostHogReplayScreenshotDedupTest.swift in Sources */,
