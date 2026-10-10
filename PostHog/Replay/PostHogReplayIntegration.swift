@@ -47,6 +47,8 @@
 
         private let screenshotRenderLock = NSLock()
         private var isScreenshotRenderInFlight = false
+        // Main-thread-only; coalesce retries after a filtered capture is dropped.
+        private var exclusionRetryScheduled = false
 
         private let eventTriggersLock = NSLock()
         private var eventTriggers: [String]?
@@ -1219,6 +1221,19 @@
             return ScreenshotCapture(wireframe: wireframe, windowSize: window.bounds.size, timestampDate: Date(), image: image)
         }
 
+        private func retryExcludedCapture(in window: UIWindow) {
+            guard Thread.isMainThread,
+                  PostHogExcludedLayerCapture.containsExclusion(window.layer),
+                  !exclusionRetryScheduled else { return }
+            exclusionRetryScheduled = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+                guard let self else { return }
+                self.exclusionRetryScheduled = false
+                // Recheck activity and select the current window through the normal gate.
+                self.snapshot()
+            }
+        }
+
         @discardableResult
         private func renderAndEnqueueScreenshot(
             _ wireframe: RRWireframe,
@@ -1236,6 +1251,7 @@
                 // a freshly-presented native VC renders black otherwise.
                 let image = collectedImage ?? window.toImage(afterScreenUpdates: episodeFirstFrame, preferFidelityRenderer: true)
                 guard let image, image.size.hasSize() else {
+                    retryExcludedCapture(in: window)
                     return false
                 }
                 wireframe.image = image
@@ -1291,6 +1307,7 @@
             // A failed measuring-tick render is a dropped frame, not permission to
             // render again with a different mode and potentially stale mask geometry.
             guard !rendersInMeasuringTick || screenshotCapture.image != nil else {
+                retryExcludedCapture(in: window)
                 return false
             }
 
