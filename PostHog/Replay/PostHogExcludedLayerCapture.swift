@@ -54,6 +54,65 @@ enum PostHogExcludedLayerCapture {
         }
     }
 
+    /// Copy only documented drawing properties. Geometry and sibling stacking
+    /// belong to the outer shell; this layer never has children or effects.
+    private static func ownDrawingLayer(_ source: CALayer) -> CALayer? {
+        let own: CALayer
+        if let shape = source as? CAShapeLayer {
+            let copy = CAShapeLayer()
+            copy.path = shape.path
+            copy.fillColor = shape.fillColor
+            copy.strokeColor = shape.strokeColor
+            copy.fillRule = shape.fillRule
+            copy.lineWidth = shape.lineWidth
+            copy.lineCap = shape.lineCap
+            copy.lineJoin = shape.lineJoin
+            copy.miterLimit = shape.miterLimit
+            copy.lineDashPhase = shape.lineDashPhase
+            copy.lineDashPattern = shape.lineDashPattern
+            copy.strokeStart = shape.strokeStart
+            copy.strokeEnd = shape.strokeEnd
+            own = copy
+        } else if let text = source as? CATextLayer {
+            let copy = CATextLayer()
+            copy.string = text.string
+            copy.font = text.font
+            copy.fontSize = text.fontSize
+            copy.foregroundColor = text.foregroundColor
+            copy.alignmentMode = text.alignmentMode
+            copy.truncationMode = text.truncationMode
+            copy.isWrapped = text.isWrapped
+            own = copy
+        } else if let gradient = source as? CAGradientLayer {
+            let copy = CAGradientLayer()
+            copy.colors = gradient.colors
+            copy.locations = gradient.locations
+            copy.startPoint = gradient.startPoint
+            copy.endPoint = gradient.endPoint
+            copy.type = gradient.type
+            own = copy
+        } else if type(of: source) == CALayer.self || source.contents != nil {
+            own = CALayer()
+        } else {
+            return nil
+        }
+        own.bounds = source.bounds
+        own.contents = source.contents
+        own.contentsScale = source.contentsScale
+        own.contentsRect = source.contentsRect
+        own.contentsCenter = source.contentsCenter
+        own.contentsGravity = source.contentsGravity
+        own.backgroundColor = source.backgroundColor
+        own.borderWidth = source.borderWidth
+        own.borderColor = source.borderColor
+        own.cornerRadius = source.cornerRadius
+        own.maskedCorners = source.maskedCorners
+        own.cornerCurve = source.cornerCurve
+        own.masksToBounds = source.masksToBounds
+        own.isGeometryFlipped = source.isGeometryFlipped
+        return own
+    }
+
     private static func copyTree(_ model: CALayer, scale: CGFloat, budget: Budget) -> CALayer? {
         let source = model.presentation() ?? model
         // Unknown geometry is omitted rather than risking a misplaced exclusion.
@@ -62,17 +121,22 @@ enum PostHogExcludedLayerCapture {
               source.bounds.width.isFinite, source.bounds.height.isFinite,
               source.bounds.width >= 0, source.bounds.height >= 0,
               budget.admit(.zero, scale: scale) else { return nil }
-        let shell = CALayer(layer: source)
-        shell.delegate = nil
-        shell.sublayers = nil
-        shell.mask = nil
-        shell.contents = nil
-        shell.backgroundColor = nil
-        shell.borderWidth = 0
-        shell.shadowOpacity = 0
-        shell.filters = nil
-        shell.compositingFilter = nil
-        shell.shouldRasterize = false
+        // init(layer:) is reserved for Core Animation presentation copies.
+        // Build ordinary detached layers using their documented properties.
+        let shell = CALayer()
+        shell.bounds = source.bounds
+        shell.position = source.position
+        shell.anchorPoint = source.anchorPoint
+        shell.transform = source.transform
+        shell.sublayerTransform = source.sublayerTransform
+        shell.zPosition = source.zPosition
+        shell.opacity = source.opacity
+        shell.isHidden = source.isHidden
+        shell.isGeometryFlipped = source.isGeometryFlipped
+        shell.masksToBounds = source.masksToBounds
+        shell.cornerRadius = source.cornerRadius
+        shell.maskedCorners = source.maskedCorners
+        shell.cornerCurve = source.cornerCurve
         shell.actions = [:]
 
         if isExcluded(model) {
@@ -88,23 +152,32 @@ enum PostHogExcludedLayerCapture {
         // screen bitmap for every empty ancestor of the viewport and controls.
         // A backdrop can cache pixels sampled from the live stream. Never copy
         // those pixels into replay; its foreground control children still draw.
-        let isBackdrop = String(describing: type(of: source)).contains("Backdrop")
+        let typeName = String(describing: type(of: source))
+        let isBackdrop = ["Backdrop", "Glass", "Filter"].contains(where: typeName.contains)
         let hasOwnDrawing = !isBackdrop && (source.contents != nil
             || (source.backgroundColor?.alpha ?? 0) > 0
             || source.borderWidth > 0
             || !(type(of: source) == CALayer.self || source is CATransformLayer || source.delegate is UIWindow))
         if !source.isHidden && source.opacity > 0 && !source.bounds.isEmpty && hasOwnDrawing {
             guard budget.admit(source.bounds.size, scale: scale) else { return nil }
-            let own = type(of: source).init(layer: source)
-            own.sublayers = nil
-            own.mask = nil
-            own.opacity = 1
-            own.shadowOpacity = 0
-            own.filters = nil
-            own.compositingFilter = nil
-            own.shouldRasterize = false
             guard let image = PostHogGraphicsImageRenderer(size: source.bounds.size, scale: scale).image(actions: { context in
-                own.render(in: context)
+                if let own = ownDrawingLayer(source) {
+                    own.render(in: context)
+                } else if model.sublayers?.isEmpty != false && model.mask == nil {
+                    // A childless native layer cannot bring an excluded subtree
+                    // into the image. Read it without altering its properties.
+                    source.render(in: context)
+                } else {
+                    // draw(in:) and the delegate's draw callback provide the
+                    // layer's own drawing, without traversing its sublayers.
+                    context.translateBy(x: -source.bounds.minX, y: -source.bounds.minY)
+                    if let delegate = source.delegate,
+                       delegate.responds(to: #selector(CALayerDelegate.draw(_:in:))) {
+                        delegate.draw?(source, in: context)
+                    } else {
+                        source.draw(in: context)
+                    }
+                }
             }), let cgImage = image.cgImage else { return nil }
             // Own drawing belongs to the parent, not a child: applying the
             // parent's sublayerTransform to it would move controls incorrectly.
