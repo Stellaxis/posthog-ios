@@ -86,10 +86,13 @@ enum PostHogExcludedLayerCapture {
         }
         // Plain container layers have no own drawing. Avoid allocating a full
         // screen bitmap for every empty ancestor of the viewport and controls.
-        let hasOwnDrawing = source.contents != nil
+        // A backdrop can cache pixels sampled from the live stream. Never copy
+        // those pixels into replay; its foreground control children still draw.
+        let isBackdrop = String(describing: type(of: source)).contains("Backdrop")
+        let hasOwnDrawing = !isBackdrop && (source.contents != nil
             || (source.backgroundColor?.alpha ?? 0) > 0
             || source.borderWidth > 0
-            || !(type(of: source) == CALayer.self || source is CATransformLayer || source.delegate is UIWindow)
+            || !(type(of: source) == CALayer.self || source is CATransformLayer || source.delegate is UIWindow))
         if !source.isHidden && source.opacity > 0 && !source.bounds.isEmpty && hasOwnDrawing {
             guard budget.admit(source.bounds.size, scale: scale) else { return nil }
             let own = type(of: source).init(layer: source)
