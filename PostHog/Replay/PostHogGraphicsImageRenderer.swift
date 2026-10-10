@@ -35,7 +35,9 @@
             }
 
             let bufferSize = pixelsPerColumn * bytesPerRow
-            guard let rawData = malloc(bufferSize) else {
+            // Detached layer capture does not paint every pixel. Start transparent
+            // so untouched pixels cannot contain stale allocation data.
+            guard let rawData = calloc(1, bufferSize) else {
                 return nil
             }
             defer { free(rawData) }
