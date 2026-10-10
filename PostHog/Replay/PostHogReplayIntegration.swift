@@ -919,7 +919,7 @@
         private func findMaskableWidgets(_ view: UIView, _ window: UIWindow, _ maskableWidgets: inout [MaskedRegion], _ maskChildren: Bool) {
             // Excluded drawing subtrees are already absent from the screenshot.
             // Adding a rectangle here would hide safe overlapping controls again.
-            if view.postHogExcludeFromReplay { return }
+            if view.postHogExcludeFromReplay || PostHogExcludedLayerCapture.isDecorativeSheetShadow(view.layer) { return }
             // Checked first so an explicit unmask wins over the sensitive-type early-returns
             // below, matching the modifier's precedence.
             if view.isNoMask() {

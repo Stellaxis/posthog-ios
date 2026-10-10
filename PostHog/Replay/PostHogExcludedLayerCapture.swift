@@ -30,8 +30,20 @@ enum PostHogExcludedLayerCapture {
 
     static func containsExclusion(_ layer: CALayer) -> Bool {
         if isInvisible(layer) { return false }
-        if isExcluded(layer) { return true }
+        if isExcluded(layer) || isDecorativeSheetShadow(layer) { return true }
         return layer.sublayers?.contains(where: containsExclusion) ?? false
+    }
+
+    // UIKit's sheet shadow is a decorative bitmap with bounds extending across
+    // the controls. Omit its pixels rather than unmasking any image content.
+    // Unknown hierarchies retain the ordinary image masking policy.
+    static func isDecorativeSheetShadow(_ layer: CALayer) -> Bool {
+        guard let view = layer.delegate as? UIImageView,
+              String(describing: type(of: view)) == "_UIRoundedRectShadowView",
+              let parent = view.superview,
+              String(describing: type(of: parent)) == "UIDropShadowView",
+              view.subviews.isEmpty, (layer.sublayers ?? []).isEmpty else { return false }
+        return true
     }
 
     private static func isExcluded(_ layer: CALayer) -> Bool {
@@ -129,7 +141,7 @@ enum PostHogExcludedLayerCapture {
     private static func copyTree(_ model: CALayer, scale: CGFloat, budget: Budget) -> CALayer? {
         // Invisible retained trees contribute no pixels. Skip before geometry
         // checks/allocation so their stale bounds cannot reject a visible frame.
-        if isInvisible(model) {
+        if isInvisible(model) || isDecorativeSheetShadow(model) {
             let empty = CALayer()
             empty.isHidden = true
             return empty
