@@ -97,11 +97,13 @@ enum PostHogExcludedLayerCapture {
             guard let image = PostHogGraphicsImageRenderer(size: source.bounds.size, scale: scale).image(actions: { context in
                 own.render(in: context)
             }), let cgImage = image.cgImage else { return nil }
-            let ink = CALayer()
-            ink.frame = source.bounds
-            ink.contents = cgImage
-            ink.contentsScale = scale
-            shell.addSublayer(ink)
+            // Own drawing belongs to the parent, not a child: applying the
+            // parent's sublayerTransform to it would move controls incorrectly.
+            shell.contents = cgImage
+            shell.contentsScale = scale
+            shell.contentsGravity = .resize
+            shell.contentsRect = CGRect(x: 0, y: 0, width: 1, height: 1)
+            shell.contentsCenter = CGRect(x: 0, y: 0, width: 1, height: 1)
         }
         // CALayer z ordering is preserved by each copied child's zPosition; order
         // remains stable for ties. SwiftUI controls are siblings of the stream.
