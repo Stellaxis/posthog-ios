@@ -179,33 +179,49 @@ enum PostHogExcludedLayerCapture {
             || source.borderWidth > 0
             || !(type(of: source) == CALayer.self || source is CATransformLayer || source.delegate is UIWindow))
         if !source.isHidden && source.opacity > 0 && !source.bounds.isEmpty && hasOwnDrawing {
-            guard budget.admit(source.bounds.size, scale: scale) else { return nil }
-            guard let image = PostHogGraphicsImageRenderer(size: source.bounds.size, scale: scale).image(actions: { context in
-                if let own = ownDrawingLayer(source) {
-                    own.render(in: context)
-                } else if model.sublayers?.isEmpty != false && model.mask == nil {
-                    // A childless native layer cannot bring an excluded subtree
-                    // into the image. Read it without altering its properties.
-                    source.render(in: context)
-                } else {
-                    // draw(in:) and the delegate's draw callback provide the
-                    // layer's own drawing, without traversing its sublayers.
-                    context.translateBy(x: -source.bounds.minX, y: -source.bounds.minY)
-                    if let delegate = source.delegate,
-                       delegate.responds(to: #selector(CALayerDelegate.draw(_:in:))) {
-                        delegate.draw?(source, in: context)
+            // Plain drawing already has detached, documented properties. Reuse its
+            // image reference instead of allocating and rasterizing a screen-sized
+            // bitmap for every ancestor. Excluded and backdrop layers returned or
+            // were rejected above, before their contents can reach this branch.
+            if type(of: source) == CALayer.self || (source.contents != nil
+                && !(source is CAShapeLayer || source is CATextLayer || source is CAGradientLayer)) {
+                shell.contents = source.contents
+                shell.contentsScale = source.contentsScale
+                shell.contentsRect = source.contentsRect
+                shell.contentsCenter = source.contentsCenter
+                shell.contentsGravity = source.contentsGravity
+                shell.backgroundColor = source.backgroundColor
+                shell.borderWidth = source.borderWidth
+                shell.borderColor = source.borderColor
+            } else {
+                guard budget.admit(source.bounds.size, scale: scale) else { return nil }
+                guard let image = PostHogGraphicsImageRenderer(size: source.bounds.size, scale: scale).image(actions: { context in
+                    if let own = ownDrawingLayer(source) {
+                        own.render(in: context)
+                    } else if model.sublayers?.isEmpty != false && model.mask == nil {
+                        // A childless native layer cannot bring an excluded subtree
+                        // into the image. Read it without altering its properties.
+                        source.render(in: context)
                     } else {
-                        source.draw(in: context)
+                        // draw(in:) and the delegate's draw callback provide the
+                        // layer's own drawing, without traversing its sublayers.
+                        context.translateBy(x: -source.bounds.minX, y: -source.bounds.minY)
+                        if let delegate = source.delegate,
+                           delegate.responds(to: #selector(CALayerDelegate.draw(_:in:))) {
+                            delegate.draw?(source, in: context)
+                        } else {
+                            source.draw(in: context)
+                        }
                     }
-                }
-            }), let cgImage = image.cgImage else { return nil }
-            // Own drawing belongs to the parent, not a child: applying the
-            // parent's sublayerTransform to it would move controls incorrectly.
-            shell.contents = cgImage
-            shell.contentsScale = scale
-            shell.contentsGravity = .resize
-            shell.contentsRect = CGRect(x: 0, y: 0, width: 1, height: 1)
-            shell.contentsCenter = CGRect(x: 0, y: 0, width: 1, height: 1)
+                }), let cgImage = image.cgImage else { return nil }
+                // Own drawing belongs to the parent, not a child: applying the
+                // parent's sublayerTransform to it would move controls incorrectly.
+                shell.contents = cgImage
+                shell.contentsScale = scale
+                shell.contentsGravity = .resize
+                shell.contentsRect = CGRect(x: 0, y: 0, width: 1, height: 1)
+                shell.contentsCenter = CGRect(x: 0, y: 0, width: 1, height: 1)
+            }
         }
         // CALayer z ordering is preserved by each copied child's zPosition; order
         // remains stable for ties. SwiftUI controls are siblings of the stream.
