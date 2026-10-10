@@ -21,7 +21,15 @@ public extension UIView {
 /// Full-tree layer rendering previously hung on SwiftUI effects. Rasterize only
 /// one childless layer at a time, then composite plain bitmap layers instead.
 enum PostHogExcludedLayerCapture {
+    // Do not let invisible retained media force unrelated pages into filtered
+    // capture. A fading layer still counts while its presentation is visible.
+    private static func isInvisible(_ layer: CALayer) -> Bool {
+        if layer.isHidden { return true }
+        return layer.opacity <= 0 && (layer.presentation()?.opacity ?? layer.opacity) <= 0
+    }
+
     static func containsExclusion(_ layer: CALayer) -> Bool {
+        if isInvisible(layer) { return false }
         if isExcluded(layer) { return true }
         return layer.sublayers?.contains(where: containsExclusion) ?? false
     }
@@ -119,6 +127,13 @@ enum PostHogExcludedLayerCapture {
     }
 
     private static func copyTree(_ model: CALayer, scale: CGFloat, budget: Budget) -> CALayer? {
+        // Invisible retained trees contribute no pixels. Skip before geometry
+        // checks/allocation so their stale bounds cannot reject a visible frame.
+        if isInvisible(model) {
+            let empty = CALayer()
+            empty.isHidden = true
+            return empty
+        }
         let source = model.presentation() ?? model
         // Unknown geometry is omitted rather than risking a misplaced exclusion.
         guard CATransform3DIsAffine(source.transform),
