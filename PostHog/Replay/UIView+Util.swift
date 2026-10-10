@@ -124,6 +124,10 @@
                 return nil
             }
 
+            if PostHogExcludedLayerCapture.containsExclusion(layer) {
+                return PostHogExcludedLayerCapture.image(of: self)
+            }
+
             // Use native screen scale for best drawHierarchy performance.
             // Using a non-native scale can trigger internal rescaling overhead.
             let nativeScale = (self as? UIWindow ?? window)?.screen.scale ?? 1
