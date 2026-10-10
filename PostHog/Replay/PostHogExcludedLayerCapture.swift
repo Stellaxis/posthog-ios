@@ -1,5 +1,6 @@
 #if os(iOS)
 import UIKit
+import AVFoundation
 import ObjectiveC
 
 private var replayExclusionKey: UInt8 = 0
@@ -26,7 +27,11 @@ enum PostHogExcludedLayerCapture {
     }
 
     private static func isExcluded(_ layer: CALayer) -> Bool {
-        (objc_getAssociatedObject(layer, &replayExclusionKey) as? Bool) ?? false
+        // Native AV playback may move between windows during full-screen transitions.
+        // Exclude the video layer by public type wherever it is mounted; controls
+        // remain independent siblings. Never read this layer's opaque contents.
+        layer is AVPlayerLayer || layer is AVSampleBufferDisplayLayer
+            || ((objc_getAssociatedObject(layer, &replayExclusionKey) as? Bool) ?? false)
     }
 
     static func image(of view: UIView) -> UIImage? {
