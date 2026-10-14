@@ -4,14 +4,127 @@ import AVFoundation
 import ObjectiveC
 
 private var replayExclusionKey: UInt8 = 0
+private var replayCaptureScaleKey: UInt8 = 0
 
 public extension UIView {
+    /// Keep touch recording active, but capture this window only when controls
+    /// change. Call setNeedsPostHogReplayCapture() after meaningful UI changes.
+    /// Configure and invalidate on the main thread, as with other UIView APIs.
+    @objc var postHogReplayCaptureOnChange: Bool {
+        get { PostHogReplayCaptureRequests.isEnabled(for: self) }
+        set { PostHogReplayCaptureRequests.setEnabled(newValue, for: self) }
+    }
+
+    /// Coalesces interface changes into a fresh reference image after settling.
+    /// Elapsed-time labels and camera frames must not call this method.
+    @objc func setNeedsPostHogReplayCapture() {
+        PostHogReplayCaptureRequests.invalidate(self)
+    }
+
+    /// Caps replay bitmap resolution for this visible subtree's window. Zero
+    /// (the default) preserves native resolution. Values below one or nonfinite
+    /// values restore the default. Set on the AR container, not a global window.
+    /// This affects replay only; live view rendering and exclusion are unchanged.
+    @objc var postHogReplayCaptureScale: CGFloat {
+        get {
+            (objc_getAssociatedObject(layer, &replayCaptureScaleKey) as? NSNumber).map { CGFloat($0.doubleValue) } ?? 0
+        }
+        set {
+            let value = newValue.isFinite && newValue >= 1 ? newValue : 0
+            objc_setAssociatedObject(layer, &replayCaptureScaleKey, NSNumber(value: Double(value)), .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        }
+    }
+
     /// Removes this view's drawing subtree from replay screenshots while preserving
     /// siblings drawn above it. Unlike a rectangular mask, overlapping controls remain.
     /// Set on the native content view, never on the container holding its controls.
     @objc var postHogExcludeFromReplay: Bool {
         get { (objc_getAssociatedObject(layer, &replayExclusionKey) as? Bool) ?? false }
         set { objc_setAssociatedObject(layer, &replayExclusionKey, newValue, .OBJC_ASSOCIATION_RETAIN_NONATOMIC) }
+    }
+}
+
+/// Weak owners avoid retaining a dismissed AR screen. Checking a registered
+/// owner and its ancestors does not traverse or rasterize the window's layers.
+enum PostHogReplayCaptureRequests {
+    static let changed = Notification.Name("PostHogReplayCaptureRequests.changed")
+    static let settleDelay: TimeInterval = 0.25
+
+    private final class Request {
+        let id = UUID()
+        var revision: UInt64 = 0
+        var changedAt = ProcessInfo.processInfo.systemUptime
+    }
+    private static let owners = NSMapTable<UIView, Request>.weakToStrongObjects()
+
+    struct Snapshot {
+        let revisions: [UUID: UInt64]
+        let readyAt: TimeInterval
+    }
+
+    static func isEnabled(for view: UIView) -> Bool { owners.object(forKey: view) != nil }
+
+    static func setEnabled(_ enabled: Bool, for view: UIView) {
+        precondition(Thread.isMainThread)
+        if enabled {
+            guard owners.object(forKey: view) == nil else { return }
+            owners.setObject(Request(), forKey: view)
+        } else {
+            owners.removeObject(forKey: view)
+        }
+        if let window = view.window {
+            NotificationCenter.default.post(name: changed, object: window)
+        }
+    }
+
+    static func invalidate(_ view: UIView) {
+        precondition(Thread.isMainThread)
+        guard let request = owners.object(forKey: view) else { return }
+        request.revision &+= 1
+        request.changedAt = ProcessInfo.processInfo.systemUptime
+        if let window = view.window {
+            NotificationCenter.default.post(name: changed, object: window)
+        }
+    }
+
+    /// A control outside the camera container may own nested SwiftUI state that
+    /// the app cannot observe. Refresh after that interaction; scene taps do not.
+    static func invalidateForControlTouch(in window: UIWindow, target: UIView?) {
+        guard let target else { return }
+        let visibleOwners = owners.keyEnumerator().allObjects.compactMap { $0 as? UIView }
+            .filter { $0.window === window && !$0.isHidden && $0.alpha > 0 }
+        guard !visibleOwners.isEmpty,
+              !visibleOwners.contains(where: { target.isDescendant(of: $0) }) else { return }
+        for owner in visibleOwners { invalidate(owner) }
+    }
+
+    static func invalidateForKeyboardChange() {
+        for case let owner as UIView in owners.keyEnumerator().allObjects where owner.window != nil {
+            invalidate(owner)
+        }
+    }
+
+    static func snapshot(in window: UIWindow) -> Snapshot {
+        precondition(Thread.isMainThread)
+        var revisions: [UUID: UInt64] = [:]
+        var readyAt: TimeInterval = 0
+        for case let view as UIView in owners.keyEnumerator().allObjects {
+            guard view.window === window,
+                  window.bounds.intersects(view.convert(view.bounds, to: window)) else { continue }
+            var ancestor: UIView? = view
+            var visible = true
+            while let current = ancestor, current !== window {
+                if current.isHidden || (current.alpha <= 0 && (current.layer.presentation()?.opacity ?? 0) <= 0) {
+                    visible = false
+                    break
+                }
+                ancestor = current.superview
+            }
+            guard visible, let request = owners.object(forKey: view) else { continue }
+            revisions[request.id] = request.revision
+            readyAt = max(readyAt, request.changedAt + settleDelay)
+        }
+        return Snapshot(revisions: revisions, readyAt: readyAt)
     }
 }
 
@@ -54,13 +167,31 @@ enum PostHogExcludedLayerCapture {
             || ((objc_getAssociatedObject(layer, &replayExclusionKey) as? Bool) ?? false)
     }
 
+    /// Read model-layer policy while applying the same visibility rules as capture.
+    /// Excluded descendants cannot contribute pixels or a resolution request.
+    static func captureScale(for layer: CALayer, nativeScale: CGFloat) -> CGFloat {
+        guard !isInvisible(layer) else { return nativeScale }
+        let requested = (objc_getAssociatedObject(layer, &replayCaptureScaleKey) as? NSNumber)?.doubleValue ?? 0
+        var scale = requested >= 1 ? min(nativeScale, CGFloat(requested)) : nativeScale
+        if scale <= 1 || isExcluded(layer) { return scale }
+        for child in layer.sublayers ?? [] {
+            scale = min(scale, captureScale(for: child, nativeScale: scale))
+            if scale <= 1 { break }
+        }
+        return scale
+    }
+
     static func image(of view: UIView) -> UIImage? {
         // A background screenshot must never fall back to unfiltered capture.
         guard Thread.isMainThread else { return nil }
-        let scale = (view as? UIWindow ?? view.window)?.screen.scale ?? 1
+        let nativeScale = (view as? UIWindow ?? view.window)?.screen.scale ?? 1
+        let scale = captureScale(for: view.layer, nativeScale: nativeScale)
         let budget = Budget(pixelLimit: view.bounds.width * view.bounds.height * scale * scale * 12)
         guard let tree = copyTree(view.layer, scale: scale, budget: budget) else { return nil }
         return PostHogGraphicsImageRenderer(size: view.bounds.size, scale: scale).image { context in
+            // Masked replay already downsamples to point resolution without
+            // interpolation. Avoid filtering the same native bitmap layers here.
+            if scale == 1 { context.interpolationQuality = .none }
             tree.render(in: context)
         }
     }
@@ -170,6 +301,10 @@ enum PostHogExcludedLayerCapture {
         shell.maskedCorners = source.maskedCorners
         shell.cornerCurve = source.cornerCurve
         shell.actions = [:]
+        if scale == 1 {
+            shell.minificationFilter = .nearest
+            shell.magnificationFilter = .nearest
+        }
 
         if isExcluded(model) {
             shell.backgroundColor = UIColor.black.cgColor

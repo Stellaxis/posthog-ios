@@ -49,6 +49,26 @@
         private var isScreenshotRenderInFlight = false
         // Main-thread-only; coalesce retries after a filtered capture is dropped.
         private var exclusionRetryScheduled = false
+        private var referenceCaptureObserver: NSObjectProtocol?
+        private var referenceKeyboardObserver: NSObjectProtocol?
+        private let referenceWakeups = NSHashTable<UIWindow>.weakObjects()
+        private struct ReferenceKey: Equatable {
+            let revisions: [UUID: UInt64]
+            let bounds: CGRect
+            let orientation: Int
+            let controller: ObjectIdentifier?
+            let session: String?
+        }
+        private final class ReferenceValue {
+            let key: ReferenceKey
+            init(_ key: ReferenceKey) { self.key = key }
+        }
+        // Main-thread-only; normal screens have no reference key.
+        private let referenceKeys = NSMapTable<UIWindow, ReferenceValue>.weakToStrongObjects()
+        #if DEBUG
+            private(set) var screenshotAttemptsForTesting = 0
+            private(set) var maskCollectionsForTesting = 0
+        #endif
 
         private let eventTriggersLock = NSLock()
         private var eventTriggers: [String]?
@@ -286,6 +306,17 @@
                 }
             }
 
+            referenceCaptureObserver = NotificationCenter.default.addObserver(
+                forName: PostHogReplayCaptureRequests.changed, object: nil, queue: .main
+            ) { [weak self] notification in
+                guard let window = notification.object as? UIWindow else { return }
+                self?.scheduleReferenceWakeup(in: window)
+            }
+
+            referenceKeyboardObserver = NotificationCenter.default.addObserver(
+                forName: UIResponder.keyboardDidChangeFrameNotification, object: nil, queue: .main
+            ) { _ in PostHogReplayCaptureRequests.invalidateForKeyboardChange() }
+
             // start listening to `UIApplication.sendEvent`
             let applicationEventPublisher = DI.main.applicationEventPublisher
             applicationEventToken = applicationEventPublisher.onApplicationEvent.subscribe { [weak self] event, date in
@@ -360,6 +391,10 @@
             applicationForegroundedToken = nil
             // stop listening to `UIView.layoutSubviews` events
             viewLayoutToken = nil
+            if let referenceCaptureObserver { NotificationCenter.default.removeObserver(referenceCaptureObserver) }
+            referenceCaptureObserver = nil
+            if let referenceKeyboardObserver { NotificationCenter.default.removeObserver(referenceKeyboardObserver) }
+            referenceKeyboardObserver = nil
             // stop plugins
             let pluginsToStop = installedPluginsLock.withLock {
                 defer { installedPlugins = [] }
@@ -379,10 +414,53 @@
         }
 
         private func resetViews() {
+            let clearReferences: () -> Void = { [weak self] in
+                self?.referenceKeys.removeAllObjects()
+                self?.referenceWakeups.removeAllObjects()
+            }
+            if Thread.isMainThread { clearReferences() }
+            else { DispatchQueue.main.async(execute: clearReferences) }
             // Ensure thread-safe access to windowViews
             windowViewsLock.withLock {
                 windowViews.removeAllObjects()
             }
+        }
+
+        private func scheduleReferenceWakeup(in window: UIWindow, attemptsRemaining: Int = 3) {
+            guard !referenceWakeups.contains(window) else { return }
+            referenceWakeups.add(window)
+            DispatchQueue.main.asyncAfter(deadline: .now() + PostHogReplayCaptureRequests.settleDelay) { [weak self, weak window] in
+                guard let self, let window else { return }
+                self.referenceWakeups.remove(window)
+                guard window.isVisible(), self.postHog?.isSessionReplayActive() == true else { return }
+                let captured = self.captureBridgeSnapshot(episodeFirstFrame: false, window: window)
+                // A finite transition retry is different from retrying a failed
+                // bitmap: image attempts have already consumed their revision.
+                if !captured, attemptsRemaining > 1, self.admitReferenceCapture(in: window) {
+                    self.scheduleReferenceWakeup(in: window, attemptsRemaining: attemptsRemaining - 1)
+                }
+            }
+        }
+
+        /// Admission precedes mask collection, layer copying and rendering. A
+        /// failed image attempt is consumed too: AR must not retry every second.
+        private func admitReferenceCapture(in window: UIWindow, consume: Bool = false) -> Bool {
+            let request = PostHogReplayCaptureRequests.snapshot(in: window)
+            guard !request.revisions.isEmpty else {
+                referenceKeys.removeObject(forKey: window)
+                return true
+            }
+            guard ProcessInfo.processInfo.systemUptime >= request.readyAt else {
+                scheduleReferenceWakeup(in: window)
+                return false
+            }
+            let key = ReferenceKey(revisions: request.revisions, bounds: window.bounds,
+                orientation: window.windowScene?.interfaceOrientation.rawValue ?? 0,
+                controller: UIViewController.ph_topViewController(base: window.rootViewController).map(ObjectIdentifier.init),
+                session: postHog?.sessionManager.getSessionId(readOnly: true))
+            guard referenceKeys.object(forKey: window)?.key != key else { return false }
+            if consume { referenceKeys.setObject(ReferenceValue(key), forKey: window) }
+            return true
         }
 
         private func tryStartScreenshotRender() -> Bool {
@@ -688,6 +766,9 @@
             // capture necessary touch information on the main thread before performing any asynchronous operations
             // - this ensures that UITouch associated objects like UIView, UIWindow, or [UIGestureRecognizer] are still valid.
             // - these objects may be released or erased by the system if accessed asynchronously, resulting in invalid/zeroed-out touch coordinates
+            for touch in touches where touch.phase == .ended {
+                PostHogReplayCaptureRequests.invalidateForControlTouch(in: window, target: touch.view)
+            }
             let touchInfo = touches.map {
                 (phase: $0.phase, location: $0.location(in: window))
             }
@@ -1173,6 +1254,9 @@
         /// render after this collection, so any rect source can go stale for content committed in
         /// between.
         private func collectMaskedRegions(in window: UIWindow) -> [MaskedRegion]? {
+            #if DEBUG
+                maskCollectionsForTesting += 1
+            #endif
             // A cover such as a SwiftUI `fullScreenCover` leaves the screen it hides attached to
             // the window, and rects from that screen would be redacted over the cover's own
             // pixels. Everything still on screen sits inside the cover, so both rect sources
@@ -1223,6 +1307,7 @@
 
         private func retryExcludedCapture(in window: UIWindow) {
             guard Thread.isMainThread,
+                  PostHogReplayCaptureRequests.snapshot(in: window).revisions.isEmpty,
                   PostHogExcludedLayerCapture.containsExclusion(window.layer),
                   !exclusionRetryScheduled else { return }
             exclusionRetryScheduled = true
@@ -1282,9 +1367,12 @@
             // Ahead of the render, not just after it: collect() now renders the image, so a session
             // that stopped between the snapshot trigger and here would otherwise pay for a
             // full-window render and throw it away.
-            guard postHog.isSessionReplayActive() else {
+            guard postHog.isSessionReplayActive(), admitReferenceCapture(in: window, consume: true) else {
                 return false
             }
+            #if DEBUG
+                screenshotAttemptsForTesting += 1
+            #endif
 
             // The bridge's first frame needs its own `afterScreenUpdates: true` pass, so it renders
             // later in renderAndEnqueueScreenshot rather than in this tick. Both callers arrive on
@@ -1579,14 +1667,14 @@
                     captureBridgeSnapshot(episodeFirstFrame: episodeFirstFrame, window: window)
                 }
             }
-            guard let postHog, postHog.isSessionReplayActive() else {
+            guard let postHog, postHog.isSessionReplayActive(), UIApplication.shared.applicationState != .background else {
                 return false
             }
             guard let window = window ?? UIApplication.getCurrentWindow() else {
                 return false
             }
             // A mid-transition capture renders black; the next tick gets it.
-            if isAnimatingTransition(window) {
+            if isAnimatingTransition(window) || !admitReferenceCapture(in: window) {
                 return false
             }
             guard tryStartScreenshotRender() else {
@@ -1657,7 +1745,8 @@
             // Same bails prepareScreenshotWireframe applies, hoisted ahead of the two sampling
             // walks: without this a view controller transition pays for both traversals and then
             // discards them, where before it walked the hierarchy zero times.
-            guard postHog.isSessionReplayActive(), window.isVisible(), !isAnimatingTransition(window) else {
+            guard postHog.isSessionReplayActive(), window.isVisible(), !isAnimatingTransition(window),
+                  admitReferenceCapture(in: window) else {
                 finishScreenshotRender()
                 return
             }
@@ -1701,6 +1790,7 @@
                 return
             }
 
+            guard admitReferenceCapture(in: window) else { return }
             var screenName: String?
 
             if let controller = window.rootViewController {
@@ -1720,6 +1810,10 @@
                 }
 
                 if postHog.config.sessionReplayConfig.screenshotModeBackgroundCapture {
+                    guard admitReferenceCapture(in: window, consume: true) else {
+                        finishScreenshotRender()
+                        return
+                    }
                     PostHogReplayIntegration.dispatchQueue.async { [weak self] in
                         self?.performBracketedBackgroundCapture(window: window, screenName: screenName, postHog: postHog)
                     }
@@ -1730,6 +1824,7 @@
             }
 
             // Wireframe mode always stays on main thread
+            guard admitReferenceCapture(in: window, consume: true) else { return }
             generateSnapshot(window, screenName, postHog: postHog, timestampDate: Date())
         }
 
